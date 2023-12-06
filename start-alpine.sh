@@ -32,11 +32,14 @@ cd $mychrootdir
 curl -L  -O https://github.com/pkgxdev/pkgx/releases/download/v1.1.1/pkgx-1.1.1+linux+aarch64.tar.xz
 tar -xvf pkgx-1.1.1+linux+aarch64.tar.xz
 chmod +x pkgx
+./pkgx git clone https://github.com/ryancnelson/x55-jelos-alpinechroot $mychrootdir/$mychrootdir-temp
+
+mv $mychrootdir/$mychrootdir-temp/* $mychrootdir/
 
 
-mkdir ${mychrootdir}/dev
-mkdir ${mychrootdir}/proc
-mkdir ${mychrootdir}/sys
+mkdir -p ${mychrootdir}/dev
+mkdir -p ${mychrootdir}/proc
+mkdir -p ${mychrootdir}/sys
 
 mount -o bind /dev  ${mychrootdir}/dev
 mount -o bind /proc ${mychrootdir}/proc
@@ -51,5 +54,5 @@ cp -L /etc/resolv.conf ${mychrootdir}/etc/resolv.conf
 # So, do nothing re: apk here
 
 
-
+echo now you should \'"chroot $mychrootdir /bin/bash -l "\'
 
