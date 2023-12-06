@@ -19,9 +19,9 @@ tar -xvf pkgx-1.1.1+linux+aarch64.tar.xz
 chmod +x pkgx
 
 
-mkdir /storage/${mychrootdir}/dev
-mkdir /storage/${mychrootdir}/proc
-mkdir /storage/${mychrootdir}/sys
+mkdir ${mychrootdir}/dev
+mkdir ${mychrootdir}/proc
+mkdir ${mychrootdir}/sys
 
 mount -o bind /dev /storage/${mychrootdir}/dev
 mount -o bind /proc /storage/${mychrootdir}/proc
