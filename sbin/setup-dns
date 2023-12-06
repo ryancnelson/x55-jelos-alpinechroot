@@ -1,0 +1,67 @@
+#!/bin/sh
+
+PREFIX=
+: ${LIBDIR=$PREFIX/lib}
+. "$LIBDIR/libalpine.sh"
+
+usage() {
+	cat <<-__EOF__
+		usage: setup-dns [-h] [-d DOMAINNAME] [IPADDR...]
+
+		Setup ${ROOT}etc/resolv.conf DNS settings
+
+		options:
+		 -h  Show this help
+		 -d  specify search domain name
+
+		The optional IPADDR are a list of DNS servers to use.
+	__EOF__
+	exit $1
+}
+
+while getopts "d:n:h" opt; do
+	case $opt in
+		d) DOMAINNAME="$OPTARG";;
+		h) usage 0;;
+		n) NAMESERVERS="$OPTARG";;
+		'?') usage "1" >&2;;
+	esac
+done
+shift $(($OPTIND - 1))
+
+
+conf="${ROOT}etc/resolv.conf"
+
+if [ -f "$conf" ] ; then
+	domain=$(awk '/^domain/ {print $2}' $conf)
+	dns=$(awk '/^nameserver/ {printf "%s ",$2}' $conf)
+elif fqdn="$(get_fqdn)" && [ -n "$fqdn" ]; then
+	domain="$fqdn"
+fi
+
+if [ -n "$DOMAINNAME" ]; then
+	domain="$DOMAINNAME"
+elif [ $# -eq 0 ]; then
+	ask "DNS domain name? (e.g 'bar.com')" "$domain"
+	domain="$resp"
+fi
+
+if [ -n "$NAMESERVERS" ] || [ $# -gt 0 ];then
+	dns="$NAMESERVERS"
+else
+	ask "DNS nameserver(s)?" "${dns% }"
+	dns="$(echo $resp | tr ',' ' ')"
+fi
+
+if [ -n "$domain" ]; then
+	mkdir -p "${conf%/*}"
+	echo "search $domain" > $conf
+fi
+
+if [ -n "$dns" ] || [ $# -gt 0 ] && [ -f "$conf" ]; then
+	sed -i -e '/^nameserver/d' $conf
+fi
+for i in $dns $@; do
+	mkdir -p "${conf%/*}"
+	echo "nameserver $i" >> $conf
+done

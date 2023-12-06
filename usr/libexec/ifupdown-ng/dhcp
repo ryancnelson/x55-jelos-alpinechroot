@@ -1,0 +1,67 @@
+#!/bin/sh
+# some users provide a shell fragment for the hostname property.
+[ -n "$IF_DHCP_HOSTNAME" ] && IF_DHCP_HOSTNAME=$(eval echo $IF_DHCP_HOSTNAME)
+
+determine_implementation() {
+	[ -n "$IF_DHCP_PROGRAM" ] && echo "$IF_DHCP_PROGRAM" && return
+	[ -x /sbin/dhcpcd ] && echo "dhcpcd" && return
+	[ -x /usr/sbin/dhclient ] && echo "dhclient" && return
+	[ -x /sbin/udhcpc ] && echo "udhcpc" && return
+	echo "could not find a supported DHCP implementation"
+	exit 1
+}
+
+start() {
+	case "$1" in
+	dhcpcd)
+		[ -n "$IF_DHCP_HOSTNAME" ] && optargs="$optargs -h $IF_DHCP_HOSTNAME"
+		[ -n "$IF_DHCP_VENDOR" ] && optargs="$optargs -i $IF_DHCP_VENDOR"
+		[ -n "$IF_DHCP_CLIENT_ID" ] && optargs="$optargs -i $IF_DHCP_CLIENT_ID"
+		[ -n "$IF_DHCP_LEASETIME" ] && optargs="$optargs -l $IF_DHCP_LEASETIME"
+		${MOCK} /sbin/dhcpcd $optargs $IFACE
+		;;
+	dhclient)
+		# Specific config file given?
+		if [ -n "$IF_DHCP_CONFIG" ]; then
+			optargs="$optargs -cf $IF_DHCP_CONFIG"
+		fi
+
+		${MOCK} /usr/sbin/dhclient -pf /var/run/dhclient.$IFACE.pid $optargs $IFACE
+		;;
+	udhcpc)
+		optargs=$(eval echo $IF_UDHCPC_OPTS)
+		[ -n "$IF_DHCP_HOSTNAME" ] && optargs="$optargs -x hostname:$IF_DHCP_HOSTNAME"
+		[ -n "$IF_DHCP_CLIENT_ID" ] && optargs="$optargs -c $IF_DHCP_CLIENT_ID"
+		[ -n "$IF_DHCP_SCRIPT" ] && optargs="$optargs -s $IF_DHCP_SCRIPT"
+		${MOCK} /sbin/udhcpc -b -R -p /var/run/udhcpc.$IFACE.pid -i $IFACE $optargs
+		;;
+	*)
+		;;
+	esac
+}
+
+stop() {
+	case "$1" in
+	dhcpcd)
+		${MOCK} /sbin/dhcpcd -k $IFACE
+		;;
+	dhclient)
+		${MOCK} kill -9 $(cat /var/run/dhclient.$IFACE.pid) 2>/dev/null
+		;;
+	udhcpc)
+		${MOCK} kill $(cat /var/run/udhcpc.$IFACE.pid)
+		;;
+	*)
+		;;
+	esac
+}
+
+impl=$(determine_implementation)
+
+[ -z "$VERBOSE" ] || set -x
+
+case "$PHASE" in
+up) start $impl ;;
+down) stop $impl || true ;;
+*) ;;
+esac

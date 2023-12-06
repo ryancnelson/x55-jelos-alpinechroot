@@ -1,0 +1,56 @@
+#!/bin/sh
+[ -z "${VERBOSE}" ] || set -x
+
+[ -z "${IF_METRIC}" ] && IF_METRIC="1"
+[ -n "${IF_VRF_TABLE}" ] && VRF_TABLE="table ${IF_VRF_TABLE}"
+[ -n "${IF_VRF_MEMBER}" ] && VRF_TABLE="vrf ${IF_VRF_MEMBER}"
+[ -n "${IF_METRIC}" ] && METRIC="metric ${IF_METRIC}"
+
+
+addr_family() {
+	if [ "$1" != "${1#*[0-9].[0-9]}" ]; then
+		echo "-4"
+	elif [ "$1" != "${1#*:[0-9a-fA-F]}" ]; then
+		echo "-6"
+	else
+		exit 1
+	fi
+}
+
+configure_addresses() {
+	for addr in ${IF_ADDRESSES}; do
+		addrfam=$(addr_family ${addr})
+		if [ "${IF_POINT_TO_POINT}" -a "${addrfam}" = "-4" ]; then
+			PEER="peer ${IF_POINT_TO_POINT}"
+		else
+			PEER=""
+		fi
+
+		${MOCK} ip "${addrfam}" addr add "${addr}" ${PEER} dev "${IFACE}"
+	done
+}
+
+configure_gateways() {
+	for gw in ${IF_GATEWAYS}; do
+		addrfam=$(addr_family ${gw})
+		${MOCK} ip "${addrfam}" route add default via "${gw}" ${VRF_TABLE} ${METRIC} dev "${IFACE}" onlink
+	done
+}
+
+flush() {
+	cmd="addr"
+	arg="dev ${IFACE}"
+
+	${MOCK} ip ${cmd} flush ${arg}
+}
+
+case "$PHASE" in
+up)
+	configure_addresses add
+	configure_gateways add
+	;;
+down)
+	flush
+	;;
+*)	exit 0 ;;
+esac

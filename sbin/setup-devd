@@ -1,0 +1,125 @@
+#!/bin/sh -e
+
+PREFIX=
+
+: ${LIBDIR=$PREFIX/lib}
+. "$LIBDIR/libalpine.sh"
+
+prog="${0##*/}"
+
+usage () {
+	cat <<EOF
+usage: setup-devd [ -h ] [ -C ] [ mdev | mdevd | udev ]
+
+Set up the device manager.
+
+Options:
+  -h  Show this help
+  -C  Perform a coldplug after starting the device manager.
+
+The optional argument tells setup-devd what device manager to use.
+mdev (from busybox) is the default.
+mdevd is standalone, compatible with mdev, more efficient.
+udev (from eudev) is the complex, full-featured one.
+Without an argument, the choice is prompted interactively.
+
+EOF
+	exit $1
+}
+
+disable_mdev () {
+	if rc-service --exists mdev ; then
+		rc-service --ifstarted --quiet hwdrivers stop
+		rc-service --ifstarted --quiet mdev stop
+		rc-update delete --quiet --quiet hwdrivers sysinit || :
+		rc-update delete --quiet --quiet mdev sysinit || :
+	fi
+}
+
+enable_mdev () {
+	apk add --quiet busybox-mdev-openrc
+	rc-update add --quiet mdev sysinit
+	rc-update add --quiet hwdrivers sysinit
+	rc-service mdev --ifstopped start
+	rc-service hwdrivers --ifstopped start
+}
+
+disable_mdevd () {
+	if rc-service --exists mdevd ; then
+		rc-service --ifstarted --quiet hwdrivers stop
+		rc-service --ifstarted --quiet mdevd stop
+		rc-update delete --quiet --quiet hwdrivers sysinit || :
+		rc-update delete --quiet --quiet mdevd-init sysinit 2>/dev/null || :
+		rc-update delete --quiet --quiet mdevd sysinit 2>/dev/null || :
+	fi
+}
+
+enable_mdevd () {
+	apk add --quiet mdevd mdevd-openrc
+	rc-update add --quiet mdevd sysinit
+	rc-update add --quiet mdevd-init sysinit
+	rc-update add --quiet hwdrivers sysinit
+	rc-service --ifstopped mdevd start
+	if "$1" ; then
+		rc-service mdevd-init start
+		rc-service hwdrivers --ifstopped start
+	fi
+}
+
+disable_udev () {
+	if rc-service --exists udev ; then
+		rc-service --ifstopped --quiet udev-postmount stop
+		rc-service --ifstarted --quiet udev stop
+		rc-update delete --quiet --quiet udev-postmount default 2>/dev/null || :
+		rc-update delete --quiet --quiet udev-settle sysinit 2>/dev/null || :
+		rc-update delete --quiet --quiet udev-trigger sysinit 2>/dev/null || :
+		rc-update delete --quiet --quiet udev sysinit 2>/dev/null || :
+	fi
+}
+
+enable_udev () {
+	apk add --quiet eudev udev-init-scripts udev-init-scripts-openrc
+	rc-update add --quiet udev sysinit
+	rc-update add --quiet udev-trigger sysinit
+	rc-update add --quiet udev-settle sysinit
+	rc-update add --quiet udev-postmount default
+	rc-service --ifstopped udev start
+	rc-service --ifstopped udev-trigger start
+	rc-service --ifstopped udev-settle start
+	rc-service --ifstopped udev-postmount start
+}
+
+coldplug=false
+while getopts "hC" opt ; do
+	case $opt in
+		h) usage 0;;
+		C) coldplug=true ;;
+		'?') usage 1 >&2;;
+	esac
+done
+shift $((OPTIND - 1))
+devd="$1"
+if test -n "$devd" ; then
+	interactive=false
+else
+	interactive=true
+fi
+
+until isin "$devd" mdev mdevd udev ; do
+	ask "What program should manage /dev? [mdev|mdevd|udev]" mdev
+	devd="$resp"
+done
+
+if "$interactive" ; then
+	if ask_yesno "Scan the hardware to populate /dev? [y|n] (Say yes if you're running this script for the first time.)" n ; then
+		coldplug=true
+	else
+		coldplug=false
+	fi
+fi
+
+case "$devd" in
+	mdev)  disable_mdevd ; disable_udev ; enable_mdev $coldplug ;;
+	mdevd) disable_mdev ; disable_udev ; enable_mdevd $coldplug ;;
+	udev)  disable_mdev ; disable_mdevd ; enable_udev $coldplug ;;
+esac

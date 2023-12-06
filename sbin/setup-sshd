@@ -1,0 +1,170 @@
+#!/bin/sh
+
+PREFIX=
+: ${LIBDIR=$PREFIX/lib}
+. "$LIBDIR/libalpine.sh"
+
+usage() {
+	cat <<-__EOF__
+		usage: setup-sshd [-h] [-k authorized key] [openssh | dropbear | none]
+
+		Setup sshd daemon
+
+		options:
+		 -h  Show this help
+		 -k  Authorized key for root (HTTP(S)/FTP URL, the public key itself or 'none')
+	__EOF__
+	exit $1
+}
+
+root_login_help() {
+	cat <<-__EOF__
+Valid options are:
+
+  yes                root will be able to login with password or ssh key
+
+  no                 root will not be allowed to login with ssh
+
+  prohibit-password  root will be able to login with ssh key but not with
+                     password
+__EOF__
+}
+
+set_sshd_config() {
+	local key="$1" value="$2"
+	sed -i -E -e "s/^#?\s*$key.*/$key $value/" \
+		"$ROOT"/etc/ssh/sshd_config 2>/dev/null
+	if ! grep -q -w "^$key" "$ROOT"/etc/ssh/sshd_config; then
+		echo "$key $value"  >> "$ROOT"/etc/ssh/sshd_config
+	fi
+}
+
+get_sshd_config() {
+	local key="$1" value="$2"
+	awk -v key="$key" '$1 == key {print $2}' "$ROOT"/etc/ssh/sshd_config
+}
+
+authorized_key="$SSH_KEY"
+while getopts "hc:k:" opt; do
+	case $opt in
+		h) usage 0;;
+		c) sshdchoice="$OPTARG";; # backwards compat
+		k) authorized_key="$OPTARG";;
+		'?') usage "1" >&2;;
+	esac
+done
+shift $(( $OPTIND - 1 ))
+
+case "$1" in
+	openssh|dropbear|none) sshdchoice="$1" ;;
+	"") [ -z "$sshdchoice" ] && interactive=1;;
+	*) usage "1" >&2;;
+esac
+
+while [ -n "$interactive" ] && ! isin "$sshdchoice" openssh dropbear none; do
+	ask "Which ssh server? ('openssh', 'dropbear' or 'none')" openssh
+	sshdchoice="$resp"
+done
+
+if [ "$sshdchoice" = "none" ]; then
+	exit 0
+fi
+
+pkgs="$sshdchoice"
+if [ "$sshdchoice" = "openssh" ] && apk info --quiet --installed acf-core; then
+	pkgs="$pkgs acf-openssh"
+fi
+
+apk add --quiet $pkgs
+
+users=$(awk -F: '{if ($3<65000 && $3 >= 1000) print $1}' \
+	"$ROOT"/etc/passwd 2>/dev/null)
+if [ "$sshdchoice" = "openssh" ] && [ -z "$authorized_key" ] && [ -z "$users" ]; then
+	suggest=prohibit-password
+	while [ -n "$interactive" ]; do
+		ask "Allow root ssh login? ('?' for help)" "$suggest"
+		case "$resp" in
+			'?')
+				root_login_help
+				continue
+				;;
+			"al "*)
+				suggest="https://gitlab.alpinelinux.org/${resp#* }.keys"
+				continue
+				;;
+			"gl "*)
+				suggest="https://gitlab.com/${resp#* }.keys"
+				continue
+				;;
+			"gh "*)
+				suggest="https://github.com/${resp#* }.keys"
+				continue
+				;;
+			yes|no|prohibit-password)
+				set_sshd_config PermitRootLogin "$resp"
+				break
+				;;
+			http://*|https://*)
+				authorized_key="$(wget -qO- "$resp")" || {
+					echo "Failed to fetch key from '$resp'"
+					continue
+				}
+				break
+				;;
+		esac
+	done
+	suggest=none
+	while [ -n "$interactive" ] && [ "$(get_sshd_config PermitRootLogin)" != "no" ]; do
+		ask "Enter ssh key or URL for root (or 'none')" "$suggest"
+		case "$resp" in
+			"al "*)
+				suggest="https://gitlab.alpinelinux.org/${resp#* }.keys"
+				continue
+				;;
+			"gl "*)
+				suggest="https://gitlab.com/${resp#* }.keys"
+				continue
+				;;
+			"gh "*)
+				suggest="https://github.com/${resp#* }.keys"
+				continue
+				;;
+			http://*|https://*)
+				authorized_key="$(wget -qO- "$resp")" || {
+					echo "Failed to fetch key from '$resp'"
+					continue
+				}
+				break
+				;;
+			none)
+				break
+				;;
+		esac
+	done
+fi
+
+#		ask "Enter ssh key or URL for $username (or 'none')" none
+
+svc=
+case "$sshdchoice" in
+	openssh) svc=sshd;;
+	dropbear) svc=dropbear;;
+esac
+
+if [ -n "$svc" ]; then
+	rc-update add $svc default
+	rc-service $svc start
+fi
+
+if [ -n "$authorized_key" -a "$authorized_key" != "none" ]; then
+	# if the argument is an HTTP(S)/FTP URL, try to fetch the file contents
+	case "$authorized_key" in
+		http*://*|ftp://)
+			key_url="$authorized_key"
+			authorized_key="$(wget -qO- "$key_url")" || die "Failed to fetch key from '$key_url'"
+			;;
+	esac
+	umask 077
+	mkdir -p "$ROOT"/root/.ssh
+	echo "$authorized_key" >> "$ROOT"/root/.ssh/authorized_keys
+fi

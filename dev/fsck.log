@@ -1,0 +1,7 @@
+Cannot initialize conversion from codepage 850 to ANSI_X3.4-1968: Invalid argument
+Cannot initialize conversion from ANSI_X3.4-1968 to codepage 850: Invalid argument
+Using internal CP850 conversion table
+STORAGE: recovering journal
+fsck.fat 4.2 (2021-01-31)
+/dev/mmcblk0p3: 8 files, 284945/523262 clusters
+STORAGE: clean, 30753/14739456 files, 7495057/58957804 blocks

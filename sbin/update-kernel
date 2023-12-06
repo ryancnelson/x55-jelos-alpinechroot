@@ -1,0 +1,390 @@
+#!/bin/sh -e
+
+# update-kernel
+#
+# Kernel and firmware update script for Alpine installations set up
+# with setup-bootable
+#
+# Copyright (c) 2014 Timo Teräs
+# Copyright (c) 2014-2021 Kaarle Ritvanen
+
+PREFIX=
+: ${LIBDIR=$PREFIX/lib}
+. "$LIBDIR/libalpine.sh"
+
+SCRIPT=update-kernel
+VIRTUAL=.tmp-$SCRIPT
+
+SUPERUSER=
+[ $(id -u) -eq 0 ] && SUPERUSER=Y
+if [ -z "$SUPERUSER" ] && [ -z "$FAKEROOTKEY" ]; then
+	exec fakeroot "$0" "$@"
+fi
+
+ARCH=
+BUILDDIR=
+FLAVOR=
+MEDIA=
+MNTDIR=
+PACKAGES=
+MKINITFS_ARGS=
+REPOSITORIES_FILE=/etc/apk/repositories
+KEYS_DIR=/etc/apk/keys
+SIGNALS="HUP INT TERM"
+tmpdir=
+features=
+modloopfw=
+
+error() {
+	echo "$SCRIPT: $1" >&2
+}
+
+usage() {
+	[ "$2" ] && error "$2" $outfh
+	local opts="[-F <feature>]... [-p <package>]..."
+	local dest_args="[-a <arch>] <dest_dir>"
+	local outfh=2
+	[ $1 -eq 0 ] && outfh=1
+	cat >&$outfh <<-__EOF__
+
+		usage: $SCRIPT $opts [$dest_args]
+		       $SCRIPT -f <flavor> $opts $dest_args
+		       $SCRIPT -b <build_dir> $opts [$dest_args]
+
+		Options: -a|--arch <arch>          Install kernel for specified architecture
+		         -b|--build-dir <dir>      Install custom-built kernel
+		         -e|--modloopfw <firmware> Install extra firmware in modloop
+		         -f|--flavor <flavor>      Install kernel of specified flavor
+		         -F|--feature <feature>    Enable initfs feature
+		         -p|--package <package>    Additional module or firmware package
+		         -s|--modloopsign          Sign modloop with abuild key
+		         -v|--verbose              Verbose output
+		         -k|--apk-pubkey <key>     Include given key in initramfs
+		         -K|--hostkeys             Include host keys in initramfs
+		         -C|--compression          Initramfs compression (see mkinitfs for options)
+		         -M|--media                Boot media directory layout
+		         -d|--keys-dir             Override directory of trusted keys for apk
+		         --repositories-file <f>   apk repositories file
+
+		On low-memory systems, you may want to point the TMPDIR environment variable to
+		a storage-backed directory.
+
+	__EOF__
+	exit $1
+}
+
+QUIET_OPT="--quiet"
+OPTS=$(getopt -l arch:,build-dir:,flavor:,feature:,modloopfw:,help,package:,modloopsign,verbose,apk-pubkey:,hostkeys,compression:,media,repositories-file:,keys-dir: \
+	-n $SCRIPT -o a:b:f:F:hp:svk:KC:Md: -- "$@") || usage 1
+
+eval set -- "$OPTS"
+while :; do
+	case "$1" in
+	-a|--arch)
+		shift
+		ARCH=$1
+		;;
+	-b|--build-dir)
+		shift
+		BUILDDIR=$1
+		;;
+	-f|--flavor)
+		shift
+		FLAVOR=$1
+		;;
+	-F|--feature)
+		shift
+		features="$features $1"
+		;;
+	-e|--modloopfw)
+		shift
+		modloopfw="$modloopfw $1"
+		;;
+	-h|--help)
+		echo "$SCRIPT 3.16.2-r0"
+		usage 0
+		;;
+	-p|--package)
+		shift
+		PACKAGES="$PACKAGES $1"
+		;;
+	-s|--modloopsign)
+		MODLOOPSIGN=1
+		;;
+	-v|--verbose)
+		QUIET_OPT=
+		;;
+	-k|--apk-pubkey)
+		shift
+		APK_PUBKEY="$1"
+		;;
+	-K|--hostkeys)
+		MKINITFS_ARGS="$MKINITFS_ARGS -K"
+		;;
+	-C|--compression)
+		shift
+		MKINITFS_ARGS="$MKINITFS_ARGS -C $1"
+		;;
+	-M|--media)
+		MEDIA=yes
+		;;
+	-d|--keys-dir)
+		shift
+		KEYS_DIR="$1"
+		;;
+	--repositories-file)
+		shift
+		REPOSITORIES_FILE=$1
+		;;
+	--)
+		break
+		;;
+	esac
+	shift
+done
+
+DESTDIR=$2
+
+
+[ "$BUILDDIR" -a "$FLAVOR" ] && \
+	usage 1 "Cannot specify both build directory and flavor"
+
+if [ -z "$DESTDIR" ]; then
+	[ "$ARCH" ] && \
+		usage 1 "Cannot specify architecture when updating the current kernel"
+
+	[ "$FLAVOR" ] && \
+		usage 1 "Cannot specify flavor when updating the current kernel"
+
+	[ "$SUPERUSER" ] || \
+		usage 1 "Specify destination directory or run as superuser"
+
+	while read MOUNT; do
+		set -- $MOUNT
+		[ $2 = /.modloop ] || continue
+		DESTDIR=$(dirname $(busybox losetup $1 | cut -d " " -f 3))
+		MNTDIR=$(dirname "$DESTDIR")
+		break
+	done < /proc/mounts
+
+	if [ -z "$MNTDIR" ]; then
+		error "Module loopback device not mounted"
+		exit 1
+	fi
+fi
+
+remount() {
+	mount $1 -o remount "$MNTDIR"
+}
+
+
+ignore_sigs() {
+	trap "" $SIGNALS
+}
+
+clean_up() {
+	set +e
+	ignore_sigs
+
+	if [ "$SUPERUSER" ] && [ -z "$FAKEROOTKEY" ]; then
+		apk del $QUIET_OPT $VIRTUAL
+	fi
+	rm -fr $tmpdir
+}
+
+sign_modloop() {
+	local in="$1"
+	local abuild_conf="${ABUILD_CONF:-"/etc/abuild.conf"}"
+	local abuild_home="${ABUILD_USERDIR:-"$HOME/.abuild"}"
+	local abuild_userconf="${ABUILD_USERCONF:-"$abuild_home/abuild.conf"}"
+	[ -f "$abuild_userconf" ] && . "$abuild_userconf"
+	local privkey="$PACKAGER_PRIVKEY"
+	local pubkey="${PACKAGER_PUBKEY:-"${privkey}.pub"}"
+	MODLOOPSIG=${in##*/}.SIGN.RSA.${pubkey##*/}
+	echo "Signing: $in"
+	openssl dgst -sha1 -sign "$privkey" \
+		-out "$tmpdir/$MODLOOPSIG" \
+		"$in"
+}
+
+trap clean_up EXIT $SIGNALS
+
+
+if [ "$SUPERUSER" ] && [ -z "$FAKEROOTKEY" ]; then
+	apk add $QUIET_OPT --update-cache -t $VIRTUAL mkinitfs squashfs-tools kmod
+fi
+
+if [ -z "$features" ]; then
+	. "$ROOT"/etc/mkinitfs/mkinitfs.conf
+fi
+
+if [ -z "$FLAVOR" ]; then
+	FLAVOR=$(uname -r | cut -d - -f 3-)
+	[ "$FLAVOR" ] || FLAVOR=vanilla
+fi
+
+[ "$ARCH" ] || ARCH=$(apk --print-arch)
+
+tmpdir=$(mktemp -dt $SCRIPT.XXXXXX)
+ROOTFS=$tmpdir/root
+BOOT=$ROOTFS/boot
+
+_apk() {
+	local cmd="$1"
+	shift
+
+	apk $cmd $QUIET_OPT -p $ROOTFS --arch "$ARCH" \
+		--keys-dir $KEYS_DIR \
+		--repositories-file "$REPOSITORIES_FILE" $*
+}
+
+extra_pkgs() {
+	local res="$(_apk search -x $1)"
+	if [ "$res" ]; then
+		echo $*
+	fi
+}
+
+# set up the root and get the APKINDEX for search
+_apk add --initdb --update-cache
+
+if [ "$BUILDDIR" ]; then
+	case "$ARCH" in
+		arm*|aarch64*)	_install="zinstall dtbs_install" ;;
+		riscv64)	_install="zinstall dtbs_install" ;;
+		*)		_install="install" ;;
+	esac
+
+	mkdir -p $BOOT
+	make -C "$BUILDDIR" $_install firmware_install modules_install \
+		INSTALL_MOD_PATH=$ROOTFS \
+		INSTALL_PATH=$BOOT \
+		INSTALL_DTBS_PATH='$ROOTFS/usr/lib/linux-$(KERNELRELEASE)'
+else
+	if [ -z "$PACKAGES" ]; then
+		PACKAGES="$(extra_pkgs "dahdi-linux-$FLAVOR" dahdi-linux)
+			$(extra_pkgs "xtables-addons-$FLAVOR")"
+	fi
+	PACKAGES="$PACKAGES linux-$FLAVOR linux-firmware"
+fi
+_apk add --no-scripts alpine-base $PACKAGES
+
+if [ -n "$APK_PUBKEY" ]; then
+	mkdir -p "$ROOTFS"/etc/apk/keys
+	cp "$APK_PUBKEY" "$ROOTFS"/etc/apk/keys/
+fi
+
+KVER_FLAVOR=
+[ "$FLAVOR" = vanilla ] || KVER_FLAVOR=-$FLAVOR
+KVER=$(basename $(ls -d $ROOTFS/lib/modules/*"$KVER_FLAVOR"))
+DTBDIR=$ROOTFS/boot/dtbs-$FLAVOR
+[ -d "$DTBDIR" ] || DTBDIR=$ROOTFS/usr/lib/linux-$KVER
+[ -d "$DTBDIR" ] || DTBDIR=$ROOTFS/boot
+find $ROOTFS/lib/modules \
+	   -name \*.ko.gz -exec gunzip {} + \
+	-o -name \*.ko.xz -exec unxz {} + \
+	-o -name \*.ko.zst -exec unzstd --rm {} + \
+	-o ! -name '' # don't fail if no files found. busybox find doesn't support -true
+$MOCK depmod -b $ROOTFS "$KVER"
+
+
+STAGING=$tmpdir/boot
+MODLOOP=$tmpdir/modloop
+MODIMG=modloop-$FLAVOR
+
+mkdir $MODLOOP $STAGING
+cp -a $ROOTFS/lib/modules $MODLOOP
+mkdir -p $MODLOOP/modules/firmware
+find $ROOTFS/lib/modules -type f -name "*.ko*" | xargs modinfo -k $KVER -F firmware | sort -u | while read FW; do
+	for f in "$ROOTFS"/lib/firmware/$FW; do
+		if ! [ -e "$f" ]; then
+			continue
+		fi
+		install -pD "$f" "$MODLOOP/modules/firmware/${f#*/lib/firmware}"
+		# copy also all potentially associated files
+		for _file in "${f%.*}".*; do
+			install -pD "$_file" "$MODLOOP/modules/firmware/${_file#*/lib/firmware/}"
+		done
+	done
+done
+
+# install extra firmware files in modloop (i.e. not detected by modinfo)
+for _xfw in $modloopfw; do
+	if [ -f "$ROOTFS/lib/firmware/$_xfw" ]; then
+		install -pD "$ROOTFS/lib/firmware/$_xfw" \
+			"$MODLOOP"/modules/firmware/"$_xfw"
+	else
+		echo "Warning: extra firmware \"$_xfw\" not found!"
+	fi
+done
+
+# wireless regulatory db
+if [ -e "$ROOTFS"/lib/modules/*/kernel/net/wireless/cfg80211.ko* ]; then
+	for _regdb in "$ROOTFS"/lib/firmware/regulatory.db*; do
+		[ -e "$_regdb" ] && install -pD "$_regdb" "$MODLOOP"/modules/firmware/"${_regdb##*/}"
+	done
+fi
+
+# include bluetooth firmware in modloop
+if [ -e "$ROOTFS"/lib/modules/*/kernel/drivers/bluetooth/btbcm.ko* ]; then
+	for _btfw in "$ROOTFS"/lib/firmware/brcm/*.hcd; do
+		install -pD "$_btfw" \
+			"$MODLOOP"/modules/firmware/brcm/"${_btfw##*/}"
+	done
+fi
+
+case $ARCH in
+	armhf) mksfs="-Xbcj arm" ;;
+	armv7|aarch64) mksfs="-Xbcj arm,armthumb" ;;
+	x86|x86_64) mksfs="-Xbcj x86" ;;
+	*) mksfs=
+esac
+mksquashfs $MODLOOP "$STAGING/$MODIMG" $MKSQUASHFS_OPTS -comp xz -exit-on-error $mksfs
+
+if [ -n "$MODLOOPSIGN" ]; then
+	sign_modloop "$STAGING/$MODIMG"
+	MKINITFS_ARGS="$MKINITFS_ARGS -s $tmpdir/$MODLOOPSIG"
+fi
+
+$MOCK mkinitfs $MKINITFS_ARGS -q -b $ROOTFS -F "$features base squashfs" \
+	-o "$STAGING/initramfs-$FLAVOR" "$KVER"
+
+for file in System.map config vmlinuz; do
+	if [ -f "$BOOT/$file-$FLAVOR" ]; then
+		cp "$BOOT/$file-$FLAVOR" $STAGING
+	else
+		cp "$BOOT/$file" $STAGING
+	fi
+done
+
+if [ "$MNTDIR" ]; then
+	ignore_sigs
+	umount /.modloop
+	remount -w
+fi
+
+mkdir -p "$DESTDIR"/${MEDIA:+boot/}
+mv $STAGING/* "$DESTDIR"/${MEDIA:+boot/}
+
+if [ -d "$DTBDIR" ]; then
+	_opwd=$PWD
+	case "$MEDIA,$FLAVOR" in
+	yes,rpi*) _dtb="$DESTDIR/" ;;
+	yes,*)    _dtb="$DESTDIR/boot/dtbs-$FLAVOR" ;;
+	*,*)      _dtb="$DESTDIR/dtbs/dtbs-$FLAVOR" ;;
+	esac
+	mkdir -p "$_dtb"
+	_dtb=$(realpath "$_dtb")
+	cd "$DTBDIR"
+	find -type f \( -name "*.dtb" -o -name "*.dtbo" \) | cpio -pudm "$_dtb" 2> /dev/null
+	cd "$_opwd"
+fi
+
+if [ "$MNTDIR" ]; then
+	set +e
+	sync
+	remount -r
+	mount -o loop "$DESTDIR/$MODIMG" /.modloop
+fi
+
+exit 0

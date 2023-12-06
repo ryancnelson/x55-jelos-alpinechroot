@@ -1,0 +1,133 @@
+#!/bin/sh
+
+PREFIX=
+: ${LIBDIR=$PREFIX/lib}
+. "$LIBDIR/libalpine.sh"
+
+usage() {
+	cat <<-__EOF__
+		usage: setup-desktop [-h] [gnome|plasma|xfce]
+
+		Install a standard desktop
+
+		options:
+		 -h  Show this help
+
+	__EOF__
+	exit $1
+}
+
+while getopts "h" opt; do
+	case $opt in
+		h) usage 0;;
+		'?') usage "1" >&2;;
+	esac
+done
+shift $(($OPTIND - 1))
+
+if [ $# -gt 1 ]; then
+	usage "1" >&2
+fi
+
+if [ $# -eq 0 ]; then
+	users=$(awk -F: '{if ($3<65000 && $3 >= 1000) print $1}' "$ROOT"/etc/passwd 2>/dev/null)
+	if [ -z "$users" ]; then
+		setup-user -g "audio,video,netdev"
+	fi
+fi
+
+de="$1"
+
+valid_desktops="xfce gnome plasma none"
+if [ $# -eq 1 ] && ! isin "$de" $valid_desktops; then
+	echo "$de is not a valid desktop" >&2
+	usage "1" >&2
+fi
+shift
+
+while ! isin "$de" $valid_desktops; do
+	ask "Which desktop environment? ('gnome', 'plasma', 'xfce' or 'none')" none
+	de="$resp"
+done
+
+case "$de" in
+	none)
+		exit 0
+		;;
+	xfce)
+		setup-xorg-base xfce4 ${BROWSER:-firefox} \
+			consolekit2 \
+			gvfs \
+			lightdm \
+			lightdm-gtk-greeter \
+			polkit \
+			xfce4-terminal \
+			"$@"
+		rc-update add lightdm
+		;;
+	gnome)
+		setup-xorg-base ${BROWSER:-firefox} $(apk info --quiet --depends \
+			gnome gnome-apps-core) "$@"
+		rc-update add gdm
+		rc-update add elogind
+		;;
+	plasma)
+		setup-xorg-base ${BROWSER:-firefox} \
+			ark \
+			bluedevil \
+			breeze \
+			breeze-gtk \
+			breeze-icons \
+			dbus \
+			discover \
+			drkonqi \
+			font-noto \
+			gwenview \
+			kate \
+			kde-cli-tools \
+			kde-gtk-config \
+			kdeplasma-addons \
+			kgamma5 \
+			khotkeys \
+			kinfocenter \
+			kio-fuse \
+			kmenuedit \
+			konsole \
+			kscreen \
+			ksshaskpass \
+			kwallet-pam \
+			kwayland-integration \
+			pinentry-qt \
+			plasma-browser-integration \
+			plasma-desktop \
+			plasma-disks \
+			plasma-nm \
+			plasma-pa \
+			plasma-systemmonitor \
+			plasma-vault \
+			plasma-workspace-wallpapers \
+			polkit-elogind \
+			polkit-kde-agent-1 \
+			print-manager \
+			powerdevil \
+			sddm-breeze \
+			sddm-kcm \
+			spectacle \
+			systemsettings \
+			udisks2 \
+			xdg-desktop-portal-kde \
+			xdg-user-dirs \
+			"$@"
+		rc-update add dbus
+		rc-update add sddm
+		;;
+	*)
+		usage "1" >&2
+		;;
+esac
+
+users=$(awk -F: '{if ($3<65000 && $3 >= 1000) print $1}' "$ROOT"/etc/passwd 2>/dev/null)
+if [ -z "$users" ]; then
+	echo "WARNING: You need to create a user account. Please run: setup-user" >&2
+	echo "" >&2
+fi

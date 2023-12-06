@@ -1,0 +1,23 @@
+#!/bin/sh
+
+# simple script to setup basic xen dom0
+
+# kernel modules
+mkdir -p "$ROOT"/etc
+for mod in xen_netback xen_blkback xenfs xen_pciback xen_wdt tun; do
+	if $MOCK modprobe $mod; then
+		grep -q -w $mod "$ROOT"/etc/modules 2>/dev/null || echo $mod >> "$ROOT"/etc/modules
+	fi
+done
+
+# install packages
+apk add --quiet xen
+
+# setup and start services
+for svc in xenstored xenconsoled xenqemu; do
+	rc-update --quiet add $svc default
+done
+
+rc-service xenstored start
+rc-service xenconsoled start
+rc-service xenqemu start

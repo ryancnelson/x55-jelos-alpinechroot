@@ -1,0 +1,199 @@
+#!/bin/sh
+
+PREFIX=
+: ${LIBDIR=$PREFIX/lib}
+. "$LIBDIR/libalpine.sh"
+
+usage() {
+	cat <<-__EOF__
+		usage: setup-apkcache [-h] [DIR]
+
+		Setup apk caching.
+
+		If DIR is not specified user will be asked for location.
+
+		options:
+		 -h  Show this help
+	__EOF__
+	exit $1
+}
+
+is_mounted() {
+	awk '{print $2}' /proc/mounts | grep -q "^$1$"
+}
+
+find_fstab_mount_point() {
+	local dir="$1"
+	local res=
+	if ! [ -r "${ROOT}"etc/fstab ]; then
+		return
+	fi
+	while [ -n "$dir" ]; do
+		res=$(awk "\$2 == \"$dir\" {print \$2}" "${ROOT}"etc/fstab)
+		if [ -n "$res" ]; then
+			echo $res
+			return
+		fi
+		dir=${dir%/*}
+	done
+}
+
+# figure out mount point
+find_mount_point() {
+	local dir="$(find_fstab_mount_point "$1")"
+	if [ -d "$dir" ] && [ "$dir" != "/" ]; then
+		echo $dir
+		return
+	fi
+
+	local dir="$1"
+	while [ -n "$dir" ] && ! [ -d "$dir" ]; do
+		dir=${dir%/*}
+	done
+
+	local fs_id="$(stat -f -c %i "${dir:-/}")"
+	local parent="${dir%/*}"
+	while [ -n "$dir" ] && [ "$(stat -f -c %i "$parent/")" = "$fs_id" ]; do
+		dir=$parent
+		parent=${parent%/*}
+	done
+	[ -z "$dir" ] && dir=/
+	echo $dir
+}
+
+# get device for a given mount point
+get_dev_from_mountpoint() {
+	local mnt="$1"
+	local fstab="$2"
+	awk "\$2 == \"$mnt\" {print \$1}" "$fstab"
+}
+
+get_mount_opts_from_mountpoint() {
+	local mnt="$1"
+	local fstab="$2"
+	awk "\$2 == \"$mnt\" {gsub(/,/, \" \", \$4); print \$4}" "$fstab"
+}
+
+has_mount_opt() {
+	local searchfor="$1"
+	local mnt="$2"
+	local fstab="$3"
+	local opts="$(get_mount_opts_from_mountpoint "$mnt" "$fstab")"
+	local opt=
+	for opt in $opts; do
+		if [ "$opt" = "$searchfor" ]; then
+			return 0
+		fi
+	done
+	return 1
+}
+
+is_mounted_ro() {
+	has_mount_opt ro "$1" /proc/mounts
+}
+
+# get the fstype of the given mount point
+mount_fstype() {
+	# we only want the last mount in case there are several
+	awk -v mnt="$1" '$2 == "/" {fstype = mnt} END {print fstype}' \
+		/proc/mounts
+}
+
+apk_cache_help() {
+	cat <<-__EOF__
+
+		Packages installed from network can be cached locally to be available during
+		boot, before the network is started. Specifying a directory here will make apk
+		cache the packages locally in this directory.
+
+		Enter 'none' if you do not want to cache packages from network.
+
+	__EOF__
+}
+
+while getopts "h" opt; do
+	case $opt in
+		h) usage 0;;
+		'?') usage "1" >&2;;
+	esac
+done
+shift $(( OPTIND - 1 ))
+
+# try auto detetect what we suggest
+suggestion=
+if [ -L "${ROOT}"etc/apk/cache ]; then
+	suggestion=$(readlink "${ROOT}"etc/apk/cache)
+fi
+
+if [ -z "$suggestion" ] && [ -f "$ROOT"etc/lbu/lbu.conf ]; then
+	. "$ROOT"etc/lbu/lbu.conf
+	if [ -n "$LBU_MEDIA" ]; then
+		suggestion=/media/$LBU_MEDIA/cache
+	fi
+fi
+
+if [ -z "$suggestion" ] && [ -L /dev/usbdisk ]; then
+	suggestion=/media/usb/cache
+fi
+
+if [ -z "$suggestion" ] && [ "$(mount_fstype /)" != "tmpfs" ]; then
+	suggestion=/var/cache/apk
+fi
+
+if [ -z "$suggestion" ]; then
+	suggestion=none
+fi
+cachedir="$1"
+
+resp=
+while [ $# -eq 0 ] && [ -z "$cachedir" ]; do
+	ask "Enter apk cache directory (or '?' or 'none')" "$suggestion"
+	cachedir="$resp"
+	if [ "$cachedir" = "?" ]; then
+		apk_cache_help
+		cachedir=
+	fi
+done
+
+if [ "$cachedir" = "none" ]; then
+	exit 0
+fi
+
+case "$cachedir" in
+	/*) ;;
+	*) cachedir="${PWD#${ROOT%/}}/$cachedir";;
+esac
+mount=$(find_mount_point "$cachedir")
+
+cleanup=
+
+if ! is_mounted "$mount"; then
+	# remove noauto that setup-lbu might have added
+	if has_mount_opt noauto "$mount" /etc/fstab; then
+		fstabtmp=$(mktemp)
+		awk -v mnt="$mount" \
+			'$2 != mnt {print $0}
+			 $2 == mnt {
+			 	sub(/noauto,|,noauto/, "", $4);
+				sub(/^noauto$/, "defaults", $4);
+				print $0
+			}' /etc/fstab > "$fstabtmp"
+		mv "$fstabtmp" /etc/fstab
+	fi
+	mount "$mount" || exit 1
+elif is_mounted_ro "$mount"; then
+	mount -o remount,rw "$mount" || exit 1
+	cleanup="remount"
+fi
+
+mkdir -p "$ROOT$cachedir"
+if [ -L "$ROOT"etc/apk/cache ]; then
+	rm -f "$ROOT"etc/apk/cache
+fi
+mkdir -p "$ROOT"etc/apk
+ln -s "$cachedir" "$ROOT"etc/apk/cache
+
+case "$cleanup" in
+	umount) umount "$mount";;
+	remount) mount -o remount,ro "$mount";;
+esac

@@ -1,0 +1,74 @@
+#!/bin/sh
+
+PREFIX=
+: ${LIBDIR=$PREFIX/lib}
+. "$LIBDIR/libalpine.sh"
+
+conf="$ROOT/etc/ssmtp/ssmtp.conf"
+
+usage() {
+	cat <<-EOF
+		usage: setup-mta [-h] [SMTPSERVER]
+
+		Setup SMTP server for outgoing email
+
+		options:
+		 -h  Show this help
+
+        If SMTPSERVER is not prompted user will be prompted
+	EOF
+	exit $1
+}
+
+cfgval() {
+	awk -F= "/^$1/ {print \$2}" $conf 2>/dev/null
+}
+
+setcfg() {
+	local key="$1"
+	local value="$2"
+	mkdir -p "${conf%/*}"
+	sed -i "s/^\\(\\#\\)*$key=.*/$key=$value/" "$conf" 2>/dev/null
+	if ! grep -q "^$key=" "$conf" 2>/dev/null; then
+		echo "$key=$value" >> "$conf"
+	fi
+}
+
+while getopts "h" opt; do
+	case $opt in
+		h) usage 0;;
+		'?') usage "1"  >&2;;
+	esac
+done
+shift $(( $OPTIND - 1 ))
+
+mailhub="$1"
+
+if [ -f "$conf" ] ; then
+	mailhub=$(cfgval mailhub)
+fi
+domain=$(hostname -d $hostname 2>/dev/null)
+if [ -z "$mailhub" ] ;then
+	if [ -n "$domain" ] ; then
+		mailhub="smtp.$domain"
+	else
+		mailhub=smtp
+	fi
+fi
+
+res=
+
+while [ $# -eq 0 ] && [ "$res" != "221" ]; do
+	ask "Outgoing mail server? (e.g 'smtp.isp.com')"  "$mailhub"
+	mailhub="$resp"
+	if ! ask_yesno "Test connection? (y/n)" y; then
+		break
+	fi
+	res=$(printf "quit\r\n\n" | nc $mailhub 25 | awk '/^221/ {print $1}')
+	[ "x$res" = "x221" ] && echo "Connection to $mailhub is ok."
+done
+
+apk add ssmtp
+
+setcfg mailhub $mailhub
+setcfg FromLineOverride YES
