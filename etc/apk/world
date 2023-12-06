@@ -2,6 +2,7 @@ alpine-base
 bash
 curl
 file
+git
 openssh-client
 socat
 vim
