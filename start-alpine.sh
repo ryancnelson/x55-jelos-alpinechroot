@@ -7,7 +7,7 @@
 set -e
 
 
-mychrootdir=/storage/ryanstuff/alpine-chroot
+mychrootdir=/storage/my-alpine-chroot
 # if mychrootdir exists, then exit
 if [ -d $mychrootdir ]; then
     echo "directory $mychrootdir already exists, exiting"
