@@ -8,6 +8,21 @@ set -e
 
 
 mychrootdir=/storage/ryanstuff/alpine-chroot
+# if mychrootdir exists, then exit
+if [ -d $mychrootdir ]; then
+    echo "directory $mychrootdir already exists, exiting"
+    echo "if you want to start over, "
+    echo "probably run something like: " 
+    
+    echo "umount $mychrootdir/dev"
+    echo "umount $mychrootdir/proc"
+    echo "umount $mychrootdir/sys"
+    echo "rm -rf $mychrootdir"
+
+    echo "and run this script again"
+    exit 1
+fi
+
 
 mkdir -p $mychrootdir
 cd $mychrootdir
