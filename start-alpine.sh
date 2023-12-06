@@ -23,9 +23,9 @@ mkdir ${mychrootdir}/dev
 mkdir ${mychrootdir}/proc
 mkdir ${mychrootdir}/sys
 
-mount -o bind /dev /storage/${mychrootdir}/dev
-mount -o bind /proc /storage/${mychrootdir}/proc
-mount -o bind /sys /storage/${mychrootdir}/sys
+mount -o bind /dev  ${mychrootdir}/dev
+mount -o bind /proc ${mychrootdir}/proc
+mount -o bind /sys  ${mychrootdir}/sys
 
 cp -L /etc/resolv.conf /storage/${mychrootdir}/etc/resolv.conf
 
