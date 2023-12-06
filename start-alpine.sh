@@ -15,7 +15,7 @@ cd $mychrootdir
 
 # fetch the 'xpkg' aarch64 binary that we'd expect to run on your powkiddy x55
 curl -L  -O https://github.com/pkgxdev/pkgx/releases/download/v1.1.1/pkgx-1.1.1+linux+aarch64.tar.xz
-tar -xvf https://github.com/pkgxdev/pkgx/releases/download/v1.1.1/pkgx-1.1.1+linux+aarch64.tar.xz
+tar -xvf pkgx-1.1.1+linux+aarch64.tar.xz
 chmod +x pkgx
 
 
