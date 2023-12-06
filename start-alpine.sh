@@ -27,7 +27,7 @@ mount -o bind /dev  ${mychrootdir}/dev
 mount -o bind /proc ${mychrootdir}/proc
 mount -o bind /sys  ${mychrootdir}/sys
 
-cp -L /etc/resolv.conf /storage/${mychrootdir}/etc/resolv.conf
+cp -L /etc/resolv.conf ${mychrootdir}/etc/resolv.conf
 
 
 ## i have hardcoded "http://mirror.clarkson.edu/alpine/latest-stable/main" in 
