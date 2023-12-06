@@ -19,6 +19,9 @@ tar -xvf https://github.com/pkgxdev/pkgx/releases/download/v1.1.1/pkgx-1.1.1+lin
 chmod +x pkgx
 
 
+mkdir /storage/${mychrootdir}/dev
+mkdir /storage/${mychrootdir}/proc
+mkdir /storage/${mychrootdir}/sys
 
 mount -o bind /dev /storage/${mychrootdir}/dev
 mount -o bind /proc /storage/${mychrootdir}/proc
